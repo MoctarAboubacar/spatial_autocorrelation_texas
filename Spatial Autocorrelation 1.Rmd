@@ -1,0 +1,252 @@
+---
+title: "Local Indicators of Spatial Autocorrelation (LISA)"
+author: "Moctar Aboubacar"
+date: "8/13/2020"
+output: 
+  html_document: 
+    toc: yes
+    number_sections: yes
+    toc_depth: 2
+    toc_float: yes
+    theme: flatly
+    highlight: zenburn
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Intro
+Spatial autocorrelation, or the idea that observations can be related to one another in space, is fundamental to spatial analysis. The problem with ignoring space where it is a relevant factor is that we generally assume (linear) model errors to be independent and identically distributed. We also assume in these models that errors have constant variance, that they are equally well specified at any point (at any location). Spatial autocorrelation threatens the tenets of basic predictive analysis much in the same way that hierarchical or nested structures might.  
+Undestood another way, there are significant advantages to using similarity in observations across space in building predictive models. Here, we'll analyze some data to identify spatial autocorrelation globally and locally, and produce maps of 'hot spots' of highly-correlated variables.  
+We'll use tract data from 5-year estimates of the Annual Community Survey (ACS) conducted by the United States Census bureau (for simplicity's sake, not considering the pooled survey design and error measures). For this analysis we'll look at the distribution of residency by race in Harris County, Texas. Harris county houses the city of Houston, in which [historical discrimination in housing](https://kinder.rice.edu/urbanedge/2020/07/02/housing-inequality-settegast-racism-within-houston-redlining) has driven socio-economic inequality and differential access to services. We can reasonably expect to find spatial autocorrelation in residency by race.  
+Furthermore, a local indicator of spatial autocorrelation (LISA)-type analysis can help us to break down the global indicator of spatial autocorrelation we are using, Moran's I, to isolate the clusters of similarity we might be interested in.
+Useful references for these analyses can be found [here](https://maczokni.github.io/crimemapping_textbook_bookdown/global-and-local-spatial-autocorrelation.html) and [here](https://rpubs.com/corey_sparks/399939).
+
+
+```{r, warning=FALSE, message=FALSE}
+# packages
+require(tidyverse)
+require(tidycensus)
+require(spdep)
+require(sf)
+require(RColorBrewer)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+rm(list = ls())
+census_api_key("6d6c309b367fe9631e24555018dade85f51db4e2")
+
+# colors 
+myPalette <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
+ggcolors <- scale_fill_gradientn(colours = myPalette(100), limits=c(0, 1))
+```
+
+# Get and arrange ACS data
+
+```{r}
+# an API is needed to access census data through tidycensus, and can be easily created with an email address.
+# census_api_key("[Your api here]")
+# ACS data variables to query
+vars <- c("B01003_001", # total population
+          "B17001_002", # Number poor households
+          "B01001H_001", # White (non-hispanic)
+          "B01001B_001", # Black
+          "B01001D_001", # Asian
+          "B01001I_001", # Hispanic
+          "B08006_002") # total car/truck/van
+```
+```{r include = F}
+# get data: Harris County, Texas
+acs_houston <- get_acs(geography = "tract", 
+                       state = "TX", 
+                       county = "Harris County", 
+                       year = 2018, # using 5-year ACS ending in 2018
+                       variables = vars,
+                       geometry = TRUE,
+                       output = "wide")
+```
+```{r eval = F}
+# get data: Harris County, Texas
+acs_houston <- get_acs(geography = "tract", 
+                       state = "TX", 
+                       county = "Harris County", 
+                       year = 2018, # using 5-year ACS ending in 2018
+                       variables = vars,
+                       geometry = TRUE,
+                       output = "wide")
+```
+```{r warning = FALSE, message=F}
+# rename variables 
+acs_houston <- acs_houston %>% 
+   mutate(totpop = B01003_001E,
+          ppov = B17001_002E / totpop,
+          white = B01001H_001E,
+          black = B01001B_001E,
+          asian = B01001D_001E,
+          hispanic = B01001I_001E,
+          pwhite = white / totpop,
+          pblack = black / totpop,
+          pasian = asian / totpop,
+          phispanic = hispanic / totpop,
+          cars_percap = B08006_002E / totpop)
+```
+
+# Exploration and vizualizing
+We select a few variables of interest, including the proportion of population within each tract of a certain race and a couple of others.  
+```{r echo=FALSE}
+#
+dat_houston <- st_drop_geometry(acs_houston[,c(18, 19, 24:28)])
+ggplot(gather(dat_houston), aes(value, fill = key))+
+   geom_histogram(bins = 10)+
+   facet_wrap(~key, scales = 'free')+
+   scale_fill_brewer(palette = "Set2")+
+   theme_minimal()+
+   theme(legend.position = "none")+
+   labs(title = "Distribution of Variables of Interest",
+        caption = "Source: 2018 US Annual Community Survey (5y est.)\n Data accessed through Tidycensus package in R")
+```
+  
+  While looking at the distribution of our variables gives us an idea of how frequent certain percentages of each race might be, ultimately we are interested in their spatial layout:
+
+```{r}
+# by-race percentage mapping
+acs_long_race <- acs_houston[,c(17, 24:27)]
+acs_long_race <- acs_long_race %>% 
+   pivot_longer(-1, names_to = "Race", values_to = "Percentage") %>% 
+   st_sf()
+# Percentage race by area, facetted 
+acs_long_race %>% 
+   ggplot(aes(fill = Percentage))+
+   facet_wrap(~Race)+
+   geom_sf(color = NA)+
+   ggcolors+
+   theme_minimal()+
+   labs(title = "Racial Salad-bowl-ing in Harris County, Texas",
+        caption = "Source: 2018 US Annual Community Survey (5y est.)\n Data accessed through Tidycensus package in R")
+```
+
+  We can visualize poverty incidence and car ownership per capita in a similar manner.  
+```{r}
+# poverty
+acs_houston %>% 
+   ggplot(aes(fill = ppov))+
+   geom_sf()+
+   ggcolors+
+   theme_minimal()+
+   labs(title = "Poverty Incidence, Harris County, Texas",
+        caption = "Source: 2018 US Annual Community Survey (5y est.)\n Data accessed through Tidycensus package in R")
+# car ownership
+acs_houston %>% 
+   ggplot(aes(fill = cars_percap))+
+   geom_sf()+
+   ggcolors+
+   theme_minimal()+
+   labs(title = "Car/truck Ownership Per Capita, Harris County, Texas",
+        caption = "Source: 2018 US Annual Community Survey (5y est.)\n Data accessed through Tidycensus package in R")
+
+# One tract, census tract 9800, is particularly interesting: it's entire population is estimated to be white, to be poor and to own no cars. a closer look reveals that we have a total population estimate of 3. It's unclear why this is, especially given that neighboring tracts are not as sparsely populated, despite being by the airport as 9800 is. A too-small number is throwing out extremes here. Moran's I is not robust to outliers (http://personal.colby.edu/personal/m/mgimond/Spatial/RobustI_writeup.html) and I don't want this point messing up the global analysis, so I take it out here.
+
+acs_houston <- acs_houston[acs_houston$ppov != 1,]
+```
+
+# Global autocorrelation: measuring with Moran's I
+We derive a measure of spatial autocorrelation using Moran's I for all our variables of interest.  Moran's I is defined as $$I = \frac{N}W \frac{\sum_i\sum_jw_{ij}(x_i-\bar{x})(x_j-\bar{x})}{\sum_i(x_i-\bar{x})^2}$$ where $N$ is our total number of spatial units which are indexed by $i$ and $j$, while $w_{ij}$ is a matrix of weights--non-adjacent spatial units have a weight of 0 in this analysis. $W$ is the sum of all weights in the set.  Moran's I measures range from -1 to 1, and work similar to a correlation coefficient. The difference is that negative values closer to -1 come closer to perfect distribution of most-different values while positive values closer to 1 come closer to perfect spatial clustering.
+```{r}
+# prep dataframe
+acs_houston2 <- acs_houston[,c(1, 19, 24:28)]
+# 1 identify neighbors and create weights matrix
+nbs <- poly2nb(acs_houston2, queen = F, row.names = acs_houston2$GEOID) # we will do this with rook adjacency.
+wts <- nb2listw(nbs, style = 'W') # the W option here is row-standardization
+# 3 Moran's test for different variables
+mtest_df <- st_drop_geometry(acs_houston2[,-1])
+test_vec <- map_dbl(mtest_df, function(x) moran.test(x, listw = wts)$estimate[1])
+test_pval <- map_dbl(mtest_df, function(x) moran.test(x, listw = wts)$p.value)
+moran_table <- cbind(est = round(test_vec, 3), p = test_pval)
+moran_table
+```
+  As Moran's I accounts for sampling variability and gives error estimates around its points, we also check these and confirm that all of our variables do indeed show spatial autocorrelation. Moran's I runs between -1 and 1, so readings that we see here of up to 0.79 are rather high. We can plot our results by variable as well, showing a variable of interest against a spatially lagged variable (which shows the average of neighboring values).  
+```{r fig.width=9, message=FALSE, warning = FALSE}
+par(mfrow = c(1,2))
+# Moran plot for pwhite
+acs_houston2$pwhite_z <- (acs_houston2$pwhite - mean(acs_houston2$pwhite)) / sd(acs_houston2$pwhite)
+# Moran plot for cars_percap
+acs_houston2$pblack_z <- (acs_houston2$pblack - mean(acs_houston2$pblack)) / sd(acs_houston2$pblack)
+moran.plot(acs_houston2$pwhite_z, listw = wts)
+moran.plot(acs_houston2$pblack_z, listw = wts)
+```
+```{r include = FALSE}
+par(mfrow = c(1,1))
+```
+# LISA hotspots analysis
+There are two major differences in the above two graphs: the dispersal around the OLS line of best fit drawn on the graph and the dispersal along the x axis. The second difference is a product of the distribution of each variable considered: the cars per capita variable is almost normally distributed while the proportion of white inhabitants is much flatter and closer to a uniform distribution. What really interests us here though is the first difference. The graph is split up into 4 quadrants at the 0-point of both variables' z-score transformation.
+The upper-right quadrant and the lower left quadrant, in short, represent instances of 'high-high' and 'low-low' correspondence between the variable and its lagged equivalent. 'high-high' points are points that are high, surrounded with other points that are high, and conversely for 'low-low' points. Note the significant clustering of 'low-low' points for the prevalence of white inhabitants, designating areas of low white inhabitants bordering other areas of low white inhabitants.  
+Where the point in question registered has a statistically significant value, we can consider these groupings to be 'hot spot' or 'cold spot' points; the examination of this sub-section selection of points from a global spatial autocorrelation test is going to be our Local Indicator of Spatial Autocorrelation, or LISA. The LISA can help us delve deeper into our Moran's I global number and see what areas/what clusters are driving the global autocorrelation (or in the absence of an indication of global autocorrelation, where clusters of autocorrelation might exist locally).
+
+```{r}
+# calculate local moran, looking at eachof the quadrants
+local_houston_w <- localmoran(acs_houston2$pwhite, listw = wts)
+#summary(local_houston_w)
+#create a lagged variable, using the z-standardized variable from before
+acs_houston2$pwhite_lag <- lag.listw(wts, var = acs_houston2$pwhite_z)
+# test by recreating the moran graph from above
+x <- acs_houston2$pwhite_z
+y <- acs_houston2$pwhite_lag
+# plot(x, y)
+# moran.plot(acs_houston2$pwhite_z, wts)
+# identify the statistically significant points within each quadrant and classify according to quadrant
+acs_houston2 <- acs_houston2 %>% 
+   mutate(quadrant = ifelse(pwhite_z > 0 & pwhite_lag > 0 & local_houston_w[,5] <= 0.05, "high-high",
+                            ifelse(pwhite_z < 0 & pwhite_lag < 0 & local_houston_w[,5] <= 0.05, "low-low",
+                                   ifelse(pwhite_z > 0 & pwhite_lag < 0 & local_houston_w[,5] <= 0.05, "high-low",
+                                          ifelse(pwhite_z < 0 & pwhite_lag > 0 & local_houston_w[,5] <= 0.05, "low-high", "non-stat-sig")))))
+table(acs_houston2$quadrant)
+```
+Just under half of our census tracts are statistically significant. We can use this to get a good idea of the hot-spots of white residency and non white-residency in Harris county.
+```{r}
+acs_houston2$hotspots <- ifelse(acs_houston2$quadrant == "high-high", "Hotspot", ifelse(acs_houston2$quadrant == "low-low", "Coolspot", "NA"))
+ggplot(acs_houston2, aes(fill = hotspots))+
+   geom_sf()+
+   scale_fill_manual(values = c("#2B83BA", "#D7191C",  "grey93"))+
+   labs(title = "Hotspots in White Residency in Harris County, Texas",
+        caption = "Source: 2018 US Annual Community Survey (5y est.)\n Data accessed through Tidycensus package in R")+
+   theme_minimal()
+```
+
+We can reproduce the same analysis for cars per capita, where we had a still-significant coefficient. However LISA analysis is also very useful in instances where global spatial autocorrelation indicators are not statistically significant.
+We can clearly see here the westward expansion of white residents outside of Houston, as well as the enclaves of white residents in further-out parts of the county, within commuting distance. The correlation of percentage of white residents and poverty in Harris County, incidentally, is of `r round(cor(acs_houston$ppov, acs_houston$pwhite), 2)`, which speaks volumes about how income inequality works in Houston.  
+The same analysis for black individuals results in the following identification of hotspots.
+```{r, include = FALSE}
+# calculate local moran, looking at each of the quadrants
+local_houston_b <- localmoran(acs_houston2$pblack, listw = wts)
+summary(local_houston_b)
+#create a lagged variable, using the z-standardized variable from before
+acs_houston2$black_lag <- lag.listw(wts, var = acs_houston2$pblack_z)
+# test by recreating the moran graph from above
+xx <- acs_houston2$pblack_z
+yy <- acs_houston2$black_lag
+plot(xx, yy)
+moran.plot(acs_houston2$pblack_z, listw = wts)
+
+# identify the statistically significant points within each quadrant and classify according to quadrant
+acs_houston2 <- acs_houston2 %>% 
+   mutate(quadrant.b = ifelse(pblack_z > 0 & black_lag > 0 & local_houston_b[,5] <= 0.05, "high-high",
+                            ifelse(pblack_z < 0 & black_lag < 0 & local_houston_b[,5] <= 0.05, "low-low",
+                                   ifelse(pblack_z > 0 & black_lag < 0 & local_houston_b[,5] <= 0.05, "high-low",
+                                          ifelse(pblack_z < 0 & black_lag > 0 & local_houston_b[,5] <= 0.05, "low-high", "non-stat-sig")))))
+table(acs_houston2$quadrant.b)
+
+acs_houston2$hotspots.b <- ifelse(acs_houston2$quadrant.b == "high-high", "Hotspot", ifelse(acs_houston2$quadrant.b == "low-low", "Coolspot", "NA"))
+```
+
+
+```{r, echo = F}
+ggplot(acs_houston2, aes(fill = hotspots.b))+
+   geom_sf()+
+   scale_fill_manual(values = c("#2B83BA", "#D7191C",  "grey93"))+
+   labs(title = "Hotspots in Black Residency in Harris County, Texas",
+        caption = "Source: 2018 US Annual Community Survey (5y est.) \n Data accessed through Tidycensus package in R")+
+   theme_minimal()
+```
