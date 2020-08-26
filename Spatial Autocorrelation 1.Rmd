@@ -67,6 +67,7 @@ acs_houston <- get_acs(geography = "tract",
                        variables = vars,
                        geometry = TRUE,
                        output = "wide")
+                       
 ```
 ```{r eval = F}
 # get data: Harris County, Texas
