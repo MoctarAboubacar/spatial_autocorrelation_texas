@@ -37,7 +37,11 @@ require(RColorBrewer)
 
 ```{r message=FALSE, warning=FALSE, include=FALSE}
 rm(list = ls())
-census_api_key("6d6c309b367fe9631e24555018dade85f51db4e2")
+
+# The Census API key is read from the environment rather than stored in this file.
+# Request a free key at https://api.census.gov/data/key_signup.html, then add a line
+# reading CENSUS_API_KEY=your_key_here to a .Renviron file in the project root.
+census_api_key(Sys.getenv("CENSUS_API_KEY"))
 
 # colors 
 myPalette <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
@@ -47,8 +51,7 @@ ggcolors <- scale_fill_gradientn(colours = myPalette(100), limits=c(0, 1))
 # Get and arrange ACS data
 
 ```{r}
-# an API is needed to access census data through tidycensus, and can be easily created with an email address.
-# census_api_key("[Your api here]")
+# An API key is needed to access census data through tidycensus (see setup chunk above).
 # ACS data variables to query
 vars <- c("B01003_001", # total population
           "B17001_002", # Number poor households
